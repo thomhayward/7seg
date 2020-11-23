@@ -17,6 +17,7 @@
 #include <avr/io.h>
 #include <stdlib.h>
 #include <util/delay.h>
+#include "ascii.hh"
 
 #define LATCH_PIN PA0
 #define CLOCK_PIN PA1
@@ -36,17 +37,18 @@
 #define START_DELAY         42
 #define TIMER_START_DELAY   (START_DELAY / DIVISOR)
 
-#define START_BYTE  (0x55)
-#define END_BYTE    (0xAA)
+#define DIGITS 8
 
-// Incomming bytes are double buffered. `input` is the incoming data buffer; `output` is the active display. 
-volatile uint8_t input_idx = 0xff;                              // input buffer index
-                                                                // `0xff` indicates start-byte (0xAA) has not been received
-volatile uint8_t input[5] = { 0, 0, 0, 0, 0 };
-volatile uint8_t output[5] = { 0, 0, 0, 0, 128 };
+volatile uint8_t input_idx = 0xFF;
+volatile uint8_t output[DIGITS];
+
+static const uint8_t mask[] = {
+    0xfe, 0xfd, 0xfb, 0xf7,
+    0xef, 0xdf, 0xbf, 0x7f
+    };
 
 template<int CLK_PIN, int DAT_PIN> void shift(uint8_t data) {
-    for (int8_t bit = 7; bit >= 0; bit--) {
+    for (int bit = 7; bit >= 0; bit--) {
         if (((data >> bit) & 0x01) == 0x01) {
             PORTA |= _BV(DAT_PIN);
         } else {
@@ -79,24 +81,17 @@ int main() {
     
     DDRA |= _BV(LATCH_PIN) | _BV(CLOCK_PIN) | _BV(DATA_PIN);
 
-    static const uint8_t digit_masks[5] = { 0xff ^ 0x20, 0xff ^ 0x10, 0xff ^ 0x08, 0xff ^ 0x04, 0xff ^ 0x02 };
+    
 
     for (;;) {
         // Ensure even illumination across all digits regardless of how many segments are active by only activating
         // one segment at a time.
         for (uint8_t segment = 0; segment < 8; segment++) {
-            for (uint8_t digit = 0; digit < 5; digit++) {
+            for (uint8_t digit = 0; digit < DIGITS; digit++) {
                 PORTA &= ~_BV(LATCH_PIN);
-                shift<CLOCK_PIN, DATA_PIN>(digit_masks[digit]);
+                shift<CLOCK_PIN, DATA_PIN>(mask[digit]);
                 shift<CLOCK_PIN, DATA_PIN>(output[digit] & _BV(segment));
                 PORTA |= _BV(LATCH_PIN);
-                // _delay_us(10);
-                // PORTA &= ~_BV(LATCH_PIN);
-                // shift<CLOCK_PIN, DATA_PIN>(0xff);
-                // shift<CLOCK_PIN, DATA_PIN>(0);
-                // PORTA |= _BV(LATCH_PIN);
-                // _delay_us(25);
-
             }
         }
     }
@@ -107,7 +102,12 @@ ISR (PCINT0_vect) {
     if ((PINA & _BV(PA6)) == 0) {                               // PA6/DI has gone low; we've probably detected a start bit
         GIMSK &= ~_BV(PCIE0);                                   // disable pin change interrupts
         TCCR0A = _BV(WGM01);                                    // setup timer0 in CTC mode
+#if (DIVISOR == 8)
+        TCCR0B = _BV(CS01);                                     // set prescaler to cpu_freq/8
+#endif
+#if (DIVISOR == 1)
         TCCR0B = _BV(CS00);                                     // set prescaler to cpu_freq/1
+#endif
         GTCCR |= _BV(PSR10);                                    // reset prescaler
         TCNT0 = 0;                                              // count up from 0
         OCR0A = HALF_BIT_TICKS - TIMER_START_DELAY;             // try to trigger the timer in the middle of a signal
@@ -125,25 +125,17 @@ ISR (TIM0_COMPA_vect) {
 }
 
 ISR (USI_OVF_vect) {                                            // USI has read eight bits
-    uint8_t data = USIDR;
-    // protocol [0xAA, xx, xx, xx, xx, xx, 0x55]
-    if (input_idx < 5) {                                        // 
-        input[input_idx] = reverse_byte(data);                  // read new byte into input buffer
-        input_idx += 1;
-    }
-    else if (input_idx == 5) {                                  // we have read 5 bytes into the input buffer
-        input_idx = 0xff;                                       // reset input index to initial condition
-        if (data == END_BYTE) {                                 // verify that a valid end byte has been received
-            for (uint8_t i = 0; i < 5; i++) {                   // copy into input buffer
-                output[i] = input[i];
-            }
+    uint8_t data = reverse_byte(USIDR);
+    if (input_idx == 0xFF) {
+        if ((data & 0xF8) == 0xF8) {
+            input_idx = data & 0x07;
         }
-    }
-    else {                                                      // we are currently in the initial condition
-        if (data == START_BYTE) {                               // if we have received a valid start byte ...
-            input_idx = 0;                                      // ... start copying incoming bytes to the input buffer
+    } else {
+        if (input_idx < DIGITS) {
+            output[input_idx] = pgm_read_byte(&ascii_mappings[data]);
         }
-    }
+        input_idx = 0xFF;
+    }    
     USICR = 0;                                                  // disable USI; we've finished reading data
     GIFR = _BV(PCIF0);                                          // clear pin change interrupt flag
     GIMSK |= _BV(PCIE0);                                        // enable pin change interrupts again

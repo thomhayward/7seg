@@ -2,6 +2,7 @@
 
 import serial
 import time
+import threading
 
 def decode_number(value):
     mapping = {'0': 63, '1': 6, '2': 91, '3': 79, '4': 102, '5': 109, '6': 125, '7': 7, '8': 127, '9': 111, '.': 128, ' ': 0 }
@@ -29,17 +30,35 @@ ser = serial.Serial(
     timeout=1
 )
 
+def output(codes):
+    for x in range(1, 5):
+        ser.write(bytearray([0xF8 | 5 - x, codes[x]]))
+
+end = False
+sepOn = False
+def blink_seperator():
+    global sepOn, ser, end
+    if sepOn:
+        sepOn = False
+    else:
+        sepOn = True
+    if sepOn:
+        ser.write(bytearray([0xF8 | 5, ord(':')]))
+    else:
+        ser.write(bytearray([0xF8 | 5, 0]))
+    if not end:
+        threading.Timer(1, blink_seperator).start()
+    
+blink_seperator()
+
 try:
-    # Initialise by writing five zeros
-    ser.write(b'\x00\x00\x00\x00\x00\x00')
     while True:
-        now = decode_number(time.strftime('%H%M'))
-        output = [0xAA, 0x03] + now + [0x55]
-        ser.write(bytearray(output))
-        time.sleep(0.5)
-        now = decode_number(time.strftime('%H%M'))
-        output = [0xAA, 0x0] + now + [0x55]
-        ser.write(bytearray(output))
-        time.sleep(0.5)
+        now = time.strftime('%H%M')
+        for x in range(4):
+            ser.write(bytearray([0xF8 | 4 - x, ord(now[x])]))
+        time.sleep(5)
 except KeyboardInterrupt:
-    ser.write(b'\xaa\x00\x00\x00\x00\x00\x55')
+    end = True
+    time.sleep(1)
+    for x in range(0, 5):
+        ser.write(bytearray([0xF8 | x, 0x00]))
