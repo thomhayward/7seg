@@ -23,7 +23,7 @@
 #define CLOCK_PIN PA1
 #define DATA_PIN PA2
 
-#define BAUDRATE            9600
+#define BAUDRATE            38400
 #define CYCLES_PER_BIT      (F_CPU / BAUDRATE)
 #if (CYCLES_PER_BIT > 255)
 #define     DIVISOR         8
@@ -37,15 +37,13 @@
 #define START_DELAY         42
 #define TIMER_START_DELAY   (START_DELAY / DIVISOR)
 
-#define DIGITS 8
+#define DIGITS 5
 
-volatile uint8_t input_idx = 0xFF;
-volatile uint8_t output[DIGITS];
+volatile uint8_t buffer_idx = 0;
+volatile uint8_t output[128];
 
-static const uint8_t mask[] = {
-    0xfe, 0xfd, 0xfb, 0xf7,
-    0xef, 0xdf, 0xbf, 0x7f
-    };
+//static const uint8_t mask[] = { 0xfe, 0xfd, 0xfb, 0xf7, 0xef, 0xdf, 0xbf, 0x7f };
+static const uint8_t mask[] = { 0xFE, 0xEF, 0xF7, 0xFB, 0xFD };
 
 template<int CLK_PIN, int DAT_PIN> void shift(uint8_t data) {
     for (int bit = 7; bit >= 0; bit--) {
@@ -80,8 +78,6 @@ int main() {
     sei();
     
     DDRA |= _BV(LATCH_PIN) | _BV(CLOCK_PIN) | _BV(DATA_PIN);
-
-    
 
     for (;;) {
         // Ensure even illumination across all digits regardless of how many segments are active by only activating
@@ -126,15 +122,33 @@ ISR (TIM0_COMPA_vect) {
 
 ISR (USI_OVF_vect) {                                            // USI has read eight bits
     uint8_t data = reverse_byte(USIDR);
-    if (input_idx == 0xFF) {
-        if ((data & 0xF8) == 0xF8) {
-            input_idx = data & 0x07;
-        }
-    } else {
-        if (input_idx < DIGITS) {
-            output[input_idx] = pgm_read_byte(&ascii_mappings[data]);
-        }
-        input_idx = 0xFF;
+    switch (data) {
+        case 0x08:  // BS
+            if (buffer_idx > 1) {
+                buffer_idx -= 1;
+            }
+            break;
+        case 0x0D:  // CR, Carriage Return
+            buffer_idx = 1;
+            output[0] = 0;
+            break;
+        case 0x3A:  // ':'
+            output[0] = 0x03;
+            break;
+        case 0x2E:  // '.'
+            if (buffer_idx > 1) {
+                output[buffer_idx - 1] |= 0x80;
+            }
+            break;
+        default:
+            uint8_t mapped = pgm_read_byte(&ascii_mappings[data]);
+            output[buffer_idx] = mapped;
+            buffer_idx += 1;
+            if (buffer_idx > 128) {
+                buffer_idx = 0;
+            }
+            break;
+
     }    
     USICR = 0;                                                  // disable USI; we've finished reading data
     GIFR = _BV(PCIF0);                                          // clear pin change interrupt flag
