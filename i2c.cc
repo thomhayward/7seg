@@ -1,212 +1,134 @@
-
+///
+/// i2c Slave Driver
+///
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include "i2c.hh"
 
-#if defined(__AVR_ATtiny85__)
-#define DDR_USI             DDRB
-#define PORT_USI            PORTB
-#define PIN_USI             PINB
-#define PORT_USI_SDA        PB0
-#define PORT_USI_SCL        PB2
-#define PIN_USI_SDA         PINB0
-#define PIN_USI_SCL         PINB2
-#define USI_START_COND_INT  USISIF
-#define USI_START_VECTOR    USI_START_vect
-#define USI_OVERFLOW_VECTOR USI_OVF_vect
-#endif
-
-#define SET_USI_TO_SEND_ACK() {                                 \
-  USIDR    =  0;                                                \
-  DDR_USI |= (1 << PORT_USI_SDA);                               \
-  USISR    = (0 << USI_START_COND_INT)  | (1 << USIOIF) |       \
-             (1 << USIPF) | (1 << USIDC)| (0x0E << USICNT0);    \
-}
-
-#define SET_USI_TO_READ_ACK() {                                     \
-    DDR_USI &= ~(1 << PORT_USI_SDA);                                \
-    USIDR    =   0;                                                 \
-    USISR    =  (0 << USI_START_COND_INT)   | (1 << USIOIF) |       \
-                (1 << USIPF) | (1 << USIDC) | (0x0E << USICNT0);    \
-}
-
-#define SET_USI_TO_TWI_START_CONDITION_MODE() {                                   \
-    USICR = (1 << USISIE) | (0 << USIOIE) | (1 << USIWM1) | (0 << USIWM0) |       \
-            (1 << USICS1) | (0 << USICS0) | (0 << USICLK) | (0 << USITC);         \
-    USISR = (0 << USI_START_COND_INT) | (1 << USIOIF) |                           \
-            (1 << USIPF)  | (1 << USIDC)  | (0x0 << USICNT0);                     \
-}
-
-#define SET_USI_TO_SEND_DATA() {                                              \
-    DDR_USI |= (1 << PORT_USI_SDA);                                           \
-    USISR    = (0 << USI_START_COND_INT)    | (1 << USIOIF) |                 \
-               (1 << USIPF) | ( 1 << USIDC) | ( 0x0 << USICNT0 );             \
-}
-
-#define SET_USI_TO_READ_DATA() { \
-    DDR_USI &= ~(1 << PORT_USI_SDA);                                          \
-    USISR    =  (0 << USI_START_COND_INT)   | (1 << USIOIF) |                 \
-                (1 << USIPF) | (1 << USIDC) | (0x0 << USICNT0);               \
-}
-
-#define USI_RECEIVE_CALLBACK() {                                              \
-    if (usi_on_receive_callback) {                                                  \
-        if (rx_count) {                              \
-            usi_on_receive_callback(rx_count);             \
-        }                                                                     \
-    }                                                                         \
-}
-
-#define ONSTOP_USI_RECEIVE_CALLBACK() {                                       \
-    if (USISR & (1 << USIPF)) {                                               \
-        USI_RECEIVE_CALLBACK();                                               \
-    }                                                                         \
-}
-
-#define USI_REQUEST_CALLBACK() {                                              \
-    USI_RECEIVE_CALLBACK();                                                   \
-    if (use_on_receive_callback) { \
-        use_on_receive_callback();                                  \
-    }\
-}
-
 typedef enum {
-    USI_SLAVE_CHECK_ADDRESS                = 0x00,
-    USI_SLAVE_SEND_DATA                    = 0x01,
-    USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA = 0x02,
-    USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA   = 0x03,
-    USI_SLAVE_REQUEST_DATA                 = 0x04,
-    USI_SLAVE_GET_DATA_AND_SEND_ACK        = 0x05
-} overflowState_t;
+    CHECK_ADDRESS,
+    SEND_DATA,
+    SEND_DATA_ACK_WAIT,
+    SEND_DATA_ACK_CHECK,
+    RECV_DATA,
+    RECV_DATA_ACK,
+} i2c_slave_state_t;
 
-static uint8_t slaveAddress;
-static volatile overflowState_t overflowState;
+i2c_slave_state_t i2c_slave_state = CHECK_ADDRESS;
 
-void (*use_on_receive_callback)(void);
-void (*usi_on_receive_callback)(uint8_t);
+uint8_t i2c_slave_address = 0;
+bool i2c_slave_register_received = false;
+uint8_t i2c_slave_register_address = 0;
+uint8_t i2c_slave_register_bank_len = 0;
+uint8_t **i2c_slave_register_bank = 0;
+void (*i2c_slave_callback)(uint8_t) = 0;
 
-static uint8_t rx_buffer[I2C_RX_BUFFER_SIZE];
-static volatile uint8_t rx_head;
-static volatile uint8_t rx_tail;
-static volatile uint8_t rx_count;
+#define USI_USICR_START_CONDITION() ((1<<USISIE)|(0<<USIOIE)|(1<<USIWM1)|(0<<USIWM0)|(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|(0 << USITC))
+#define USI_USISR_START_CONDITION() ((1<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC))
 
-static uint8_t tx_buffer[I2C_TX_BUFFER_SIZE];
-static volatile uint8_t tx_head;
-static volatile uint8_t tx_tail;
-static volatile uint8_t tx_count;
-
-void i2c_init_slave(uint8_t address) {
-    rx_head = 0;
-    rx_tail = 0;
-    rx_count = 0;
-    tx_head = 0;
-    tx_tail = 0;
-    tx_count = 0;
-    slaveAddress = address;
-    //
-    DDR_USI  |=  (1 << PORT_USI_SCL) | (1 << PORT_USI_SDA);
-    PORT_USI |=  (1 << PORT_USI_SCL);
-    PORT_USI |=  (1 << PORT_USI_SDA);
-    DDR_USI  &= ~(1 << PORT_USI_SDA);
-    USICR     =  (1 << USISIE) | (0 << USIOIE) | (1 << USIWM1) | (0 << USIWM0) |
-                    (1 << USICS1) | (0 << USICS0) | (0 << USICLK) | (0 << USITC);
-    USISR     =  (1 << USI_START_COND_INT) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC);
-}
-
-void i2c_write(uint8_t data) {
-    while (tx_count == I2C_TX_BUFFER_SIZE);
-    tx_buffer[tx_head] = data;
-    tx_head = (tx_head + 1) & I2C_TX_BUFFER_MASK;
-    tx_count++;
-}
-
-uint8_t i2c_read() {
-    uint8_t rtn_byte;
-    while (!rx_count);
-    rtn_byte = rx_buffer[rx_tail];
-    rx_tail = (rx_tail + 1) & I2C_RX_BUFFER_MASK;
-    rx_count--;
-    return rtn_byte;
-}
-
-uint8_t i2c_bytes_available() {
-    return rx_count;
-}
-
-void on_receive(void (*function)(uint8_t)) {
-    usi_on_receive_callback = function;
-}
-
-void on_request(void (*function)(void)) {
-    use_on_receive_callback = function;
+void i2c_slave_init(uint8_t address, uint8_t **register_bank, uint8_t register_bank_len, void (*callback)(uint8_t)) {
+    i2c_slave_state = CHECK_ADDRESS;
+    i2c_slave_address = address;
+    i2c_slave_register_received = false;
+    i2c_slave_register_bank = register_bank;
+    i2c_slave_register_bank_len = register_bank_len;
+    i2c_slave_callback = callback;
+    // setup SCL & SDA
+    DDR_USI |= (1<<PORT_USI_SDA)|(1<<PORT_USI_SCL);   // set SDA, SCL input
+    PORT_USI |= (1<<PORT_USI_SDA)|(1<<PORT_USI_SCL);  // set SDA, SCL pull-up
+    DDR_USI &= ~(1<<PORT_USI_SDA);                        // set SDA ouput ????
+    // setup USI
+    USICR = USI_USICR_START_CONDITION();
+	USISR = USI_USISR_START_CONDITION();
 }
 
 ISR(USI_START_VECTOR) {
-    overflowState = USI_SLAVE_CHECK_ADDRESS;
-    DDR_USI &= ~(1 << PORT_USI_SDA);
-    while ((PIN_USI & (1 << PIN_USI_SCL)) && !((PIN_USI & (1 << PIN_USI_SDA))));
-    if (!(PIN_USI & (1 << PIN_USI_SDA))) {
-        USICR = (1 << USISIE) | (1 << USIOIE) | (1 << USIWM1) | (1 << USIWM0) |
-                (1 << USICS1) | (0 << USICS0) | (0 << USICLK) | (0 << USITC);
+    // start condition detected
+    i2c_slave_state = CHECK_ADDRESS;
+    // set SDA output
+    PORT_USI |= (1<<PORT_USI_SDA);
+    DDR_USI &= ~(1<<PORT_USI_SDA);
+    // wait for SCL to go low
+    while ((PIN_USI & (1<<PIN_USI_SCL)) && !((PIN_USI & (1<<PIN_USI_SDA)))) { }
+    // test if the start condition completed
+    if (!(PIN_USI & (1<<PIN_USI_SDA))) {
+        // enable the overflow interrupt
+        USICR = (1<<USISIE)|(1<<USIOIE)|(1<<USIWM1)|(1<<USIWM0)|(1<<USICS1)|(0<<USICS0)|(0<<USICLK)|(0<<USITC);
     } else {
-        USICR = (1 << USISIE) | (0 << USIOIE) | (1 << USIWM1 ) | (0 << USIWM0) |
-                (1 << USICS1) | (0 << USICS0) | (0 << USICLK ) | (0 << USITC);
+        // we received a stop condition instead
+        USICR = USI_USICR_START_CONDITION();
     }
-    USISR = (1 << USI_START_COND_INT)   | (1 << USIOIF) |
-            (1 << USIPF) | (1 << USIDC) | (0x0 << USICNT0);
+    // clear flags by writing a 1
+    USISR = USI_USISR_START_CONDITION() | (0x0<<USICNT0);
 }
 
 ISR(USI_OVERFLOW_VECTOR) {
-    switch (overflowState) {
-        case (USI_SLAVE_CHECK_ADDRESS):
-            if ((USIDR == 0) || ((USIDR >> 1) == slaveAddress)) {
-                use_on_receive_callback();
-                if (USIDR & 0x01) {
-                    USI_REQUEST_CALLBACK();
-                    overflowState = USI_SLAVE_SEND_DATA;
+    switch (i2c_slave_state) {
+        case CHECK_ADDRESS:
+            if ((USIDR == 0) || ((USIDR >> 1) == i2c_slave_address)) {
+                if ((USIDR & 0x01) == 0x01) {
+                    i2c_slave_state = SEND_DATA;
                 } else {
-                    overflowState = USI_SLAVE_REQUEST_DATA;
+                    i2c_slave_register_received = false;
+                    i2c_slave_state = RECV_DATA;
                 }
-                SET_USI_TO_SEND_ACK();
+                // configure USI to send ACK for one clock-cycle
+                USIDR = 0;
+                DDR_USI |= (1<<PORT_USI_SDA);
+                USISR = (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|(0x0E<<USICNT0);
             } else {
-                SET_USI_TO_TWI_START_CONDITION_MODE();
+                // not us, configure USI to wait for start condition
+                USICR = USI_USICR_START_CONDITION();
+                USISR = USI_USISR_START_CONDITION() | (0x0<<USICNT0);
             }
             break;
-        case (USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA):
+        case SEND_DATA:
+            i2c_slave_state = SEND_DATA_ACK_WAIT;
+            if (i2c_slave_register_address < i2c_slave_register_bank_len) {
+                USIDR = *(i2c_slave_register_bank[i2c_slave_register_address]);
+                i2c_slave_register_address += 1;
+            } else {
+                USIDR = 0;
+            }
+            // configure USI to send contents of USIDR
+            DDR_USI |= (1<<PORT_USI_SDA);
+            USISR = (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|(0x0<<USICNT0);
+            break;
+        case SEND_DATA_ACK_WAIT:
+            i2c_slave_state = SEND_DATA_ACK_CHECK;
+            // configure USI to receive an ACK
+            DDR_USI &= ~(1<<PORT_USI_SDA);
+            USIDR = 0;
+            USISR = (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|(0x0E<<USICNT0);
+            break;
+        case SEND_DATA_ACK_CHECK:
             if (USIDR) {
-                SET_USI_TO_TWI_START_CONDITION_MODE();
-                return;
+                USICR = USI_USICR_START_CONDITION();
+                USISR = USI_USISR_START_CONDITION() | (0x0<<USICNT0);
             }
-        case (USI_SLAVE_SEND_DATA):
-            if (tx_count) {
-                USIDR = tx_buffer[tx_tail];
-                tx_tail = (tx_tail + 1) & I2C_TX_BUFFER_MASK;
-                tx_count--;
-            } else {
-                SET_USI_TO_READ_ACK();
-                SET_USI_TO_TWI_START_CONDITION_MODE();
-                return;
+            break;
+        case RECV_DATA:
+            // configure USI to receive a byte
+            i2c_slave_state = RECV_DATA_ACK;
+            DDR_USI &= ~(1<<PORT_USI_SDA);
+            USISR = (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|(0x0<<USICNT0);
+            break;
+        case RECV_DATA_ACK:
+            i2c_slave_state = RECV_DATA;
+            if (!i2c_slave_register_received) {
+                i2c_slave_register_address = USIDR;
+                i2c_slave_register_received = true;
+            } else if (i2c_slave_register_address < i2c_slave_register_bank_len) {
+                *(i2c_slave_register_bank[i2c_slave_register_address]) = USIDR;
+                // trigger the callback
+                if (i2c_slave_callback) {
+                    i2c_slave_callback(i2c_slave_register_address);
+                }
             }
-            overflowState = USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA;
-            SET_USI_TO_SEND_DATA();
-            break;
-        case (USI_SLAVE_REQUEST_REPLY_FROM_SEND_DATA):
-            overflowState = USI_SLAVE_CHECK_REPLY_FROM_SEND_DATA;
-            SET_USI_TO_READ_ACK();
-            break;
-        case (USI_SLAVE_REQUEST_DATA):
-            overflowState = USI_SLAVE_GET_DATA_AND_SEND_ACK;
-            SET_USI_TO_READ_DATA();
-            break;
-        case (USI_SLAVE_GET_DATA_AND_SEND_ACK):
-            if (rx_count < I2C_RX_BUFFER_SIZE) {
-                    rx_buffer[rx_head] = USIDR;
-                    rx_head = (rx_head + 1) & I2C_RX_BUFFER_MASK;
-                    rx_count++;
-            }
-            overflowState = USI_SLAVE_REQUEST_DATA;
-            SET_USI_TO_SEND_ACK();
+            // configure USI to send an ACK for one clock cycle
+            USIDR = 0;
+            DDR_USI |= (1<<PORT_USI_SDA);
+            USISR = (0<<USISIF)|(1<<USIOIF)|(1<<USIPF)|(1<<USIDC)|(0x0E<<USICNT0);
             break;
     }
-
 }

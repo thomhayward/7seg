@@ -1,18 +1,23 @@
-void i2c_init_slave(uint8_t);
-uint8_t i2c_bytes_available();
-void i2c_write(uint8_t);
-uint8_t i2c_read();
-void on_receive(void (*function)(uint8_t));
-void on_request(void (*function)(void));
+#ifndef __I2C_H__
+#define __I2C_H__
 
-#ifndef I2C_RX_BUFFER_SIZE
-#define I2C_RX_BUFFER_SIZE (2)
+#if defined(__AVR_ATtiny85__)
+#define DDR_USI             DDRB
+#define PORT_USI            PORTB
+#define PIN_USI             PINB
+#define PORT_USI_SDA        PB0
+#define PORT_USI_SCL        PB2
+#define PIN_USI_SDA         PINB0
+#define PIN_USI_SCL         PINB2
+#define USI_START_VECTOR    USI_START_vect
+#define USI_OVERFLOW_VECTOR USI_OVF_vect
 #endif
 
-#define I2C_RX_BUFFER_MASK (I2C_RX_BUFFER_SIZE - 1)
+void i2c_slave_init(
+    uint8_t address,
+    uint8_t **register_bank,
+    uint8_t register_bank_len,
+    void (*callback)(uint8_t)
+    );
 
-#ifndef I2C_TX_BUFFER_SIZE
-#define I2C_TX_BUFFER_SIZE (2)
 #endif
-
-#define I2C_TX_BUFFER_MASK (I2C_TX_BUFFER_SIZE - 1)

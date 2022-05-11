@@ -1,25 +1,24 @@
-#! /usr/bin/env python3
+import smbus;
+import sys;
 
-import serial
-import time
+i2c_address = 0x20
+i2c_channel = 1
 
-ser = serial.Serial(
-    port='/dev/ttyS0',
-    baudrate = 38400,
-    parity=serial.PARITY_NONE,
-    stopbits=serial.STOPBITS_ONE,
-    bytesize=serial.EIGHTBITS,
-    xonxoff=False,
-    rtscts=False,
-    dsrdtr=False,
-    timeout=1
-)
+def show(bus, address, text):
+    for index, char in enumerate(text):
+        bus.write_byte_data(address, index, ord(char))
+        val = bus.read_byte_data(address, index)
+        if val != ord(char):
+            print(f"err {val} ({chr(val)}) != {ord(char)} ({char})", file=sys.stderr)
 
-try:
-    while True:
-        for x in range(10000):
-            ser.write('\x0D{:>4d}'.format(x).encode('utf-8'))
-            # time.sleep(0.04)
+def run_count(bus, address):
+    try:
+        tick = False
+        while True:
+            for x in range(10000):
+                show(bus, address, '{:>4d}'.format(x))
 
-except KeyboardInterrupt:
-    ser.write(b'\x0D')
+    except KeyboardInterrupt:
+        show(bus, address, '     ')
+
+run_count(smbus.SMBus(i2c_channel), i2c_address)
