@@ -1,7 +1,7 @@
 
 PROJECT = driver
 
-MCU ?= attiny84
+MCU ?= attiny85
 PORT ?= $(firstword $(wildcard /dev/cu.usbmodem*))
 
 CXX = avr-g++

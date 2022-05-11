@@ -1,26 +1,31 @@
-#! /usr/bin/env python3
-
-import serial
+import smbus;
+import sys;
 import time
 
-ser = serial.Serial(
-    port='/dev/ttyS0', #Replace ttyS0 with ttyAM0 for Pi1,Pi2,Pi0
-    baudrate = 38400,
-    parity=serial.PARITY_NONE,
-    stopbits=serial.STOPBITS_ONE,
-    bytesize=serial.EIGHTBITS,
-    xonxoff=False,
-    rtscts=False,
-    dsrdtr=False,
-    timeout=1
-)
+i2c_address = 0x20
+i2c_channel = 1
 
-try:
-    while True:
-        ser.write(time.strftime('\x0D%H%M:').encode('ascii'))
-        time.sleep(1)
-        ser.write(time.strftime('\x0D%H%M').encode('ascii'))
-        time.sleep(1)
+def show(bus, address, text):
+    for index, char in enumerate(text):
+        bus.write_byte_data(address, index, ord(char))
+        val = bus.read_byte_data(address, index)
+        if val != ord(char):
+            print(f"err {val} ({chr(val)}) != {ord(char)} ({char})")
 
-except KeyboardInterrupt:
-    ser.write(b'\x0D    ')
+def run_clock(bus, address):
+    try:
+        tick = False
+        while True:
+            now = time.strftime('%H%M')
+            tick = not tick
+            if tick:
+                now += ':'
+            else:
+                now += ' '
+            show(bus, address, now)
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        show(bus, address, '     ')
+
+run_clock(smbus.SMBus(i2c_channel), i2c_address)
